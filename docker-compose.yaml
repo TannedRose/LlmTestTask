@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  flask:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    container_name: flask
+    env_file:
+      - .env
+    volumes:
+      - ./app/chromadb_faq_openai:/app/app/chromadb_faq_openai
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    container_name: bot
+    env_file:
+      - .env
+    depends_on:
+      - flask
+    restart: unless-stopped
