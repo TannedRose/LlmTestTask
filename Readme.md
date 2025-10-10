@@ -60,7 +60,6 @@ https://github.com/TannedRose/LlmTestTask.git
 OPENAI_API_KEY=
 FLASK_SECRET_KEY=
 BOT_TOKEN=
-
 ```
 
 
