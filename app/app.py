@@ -59,7 +59,7 @@ def send_message():
 
     # logger.info(f"Последние сообщения от пользователя {user_id}:")
     # for msg in context:
-        # logger.info(f"  → {msg['role']}: {msg['text']}")
+        # logger.info(f"  ! {msg['role']}: {msg['text']}")
 
     query_embedding = [get_embedding(query)]
     results = collection.query(
@@ -75,7 +75,7 @@ def send_message():
 
         if distances < threshold:
             pre_answer = results['documents'][0][0]
-            # logger.info(f"  → pre answer = {pre_answer}")
+            # logger.info(f"  ! pre answer = {pre_answer}")
             prompt = (
                 "Ты — профессиональный консультант белорусского банка «Паритетбанк». "
                 "Твоя задача — дать один чёткий, вежливый и точный ответ **только на последний вопрос пользователя**. "
