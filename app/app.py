@@ -1,9 +1,19 @@
+from collections import defaultdict
+
 from flask import Flask, jsonify, render_template, request, json
 from openai import OpenAI
 
 import chromadb
 
 import os
+
+# import logging
+#
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format='%(asctime)s [%(levelname)s] %(message)s'
+# )
+# logger = logging.getLogger(__name__)
 
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -27,6 +37,7 @@ def get_embedding(text):
     return response.data[0].embedding
 
 app = Flask(__name__)
+user_context = defaultdict(list)
 
 app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'dev-secret-key-unsafe')
 
@@ -41,6 +52,14 @@ def index():
 def send_message():
     data = request.get_json()
     query = data['message']
+    user_id = str(data['user_id'])
+
+    context = user_context[user_id][-3:]
+    user_context[user_id].append({'role': 'user', 'text': query})
+
+    # logger.info(f"Последние сообщения от пользователя {user_id}:")
+    # for msg in context:
+    #     logger.info(f"  → {msg['role']}: {msg['text']}")
 
     query_embedding = [get_embedding(query)]
     results = collection.query(
@@ -55,17 +74,21 @@ def send_message():
         threshold = 0.9
 
         if distances < threshold:
-            answer = results['documents'][0][0]
-        else:
-            context = results['documents'][0][0]
-            prompt = (f"Use the following context to answer the question. Context: {context}"
-                      f" Question: {query} Answer:")
+            pre_answer = results['documents'][0][0]
+            prompt = (f"Ты являешься профессиональным консультантом в белорусском банке Paritet."
+              f"Мне нужно получать максималоьно точный и структурированный ответ в коце."
+              f"Используй Context и Answer (сырой ответ из базы знаний) чтобы вносить правки. "
+              f"Никогда не упоминайте о контексте и о том, откуда взята информация."
+              f"Context : {context}, Answer: {pre_answer}")
             response = client_openai.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=200
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200
             )
             answer = response.choices[0].message.content
+        else:
+            answer = "Не могу найти ответ на этот вопрос."
+
     response = {'message': answer}
     return jsonify(response)
 

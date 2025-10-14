@@ -24,10 +24,11 @@ async def cmd_start(message: types.Message):
 @dp.message(F.text)
 async def receive_prompt(message: Message):
     prompt = message.text
-    jsonData={'message': prompt}
+    user_id = message.from_user.id
+    jsonData={"user_id": user_id, 'message': prompt}
     jsonResponse = requests.post(
         url+'/send_message',
-        json=jsonData
+        json=jsonData,
     )
 
     response = jsonResponse.json()
