@@ -119,8 +119,6 @@ def send_message():
                 except Exception as e:
                     logger.error(f"Неожиданная ошибка при вызове OpenAI: {e}")
                     return jsonify({"message": "Произошла ошибка, попробуйте позже..."})
-
-
             else:
                 answer = "Не могу найти ответ на этот вопрос."
 
