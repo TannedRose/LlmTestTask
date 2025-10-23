@@ -7,8 +7,18 @@ import requests
 
 import os
 
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 
 bot_token = os.getenv("BOT_TOKEN")
+if not bot_token:
+    raise ValueError("BOT_TOKEN не задан в переменных окружения")
 
 url = 'http://flask:5000/'
 
@@ -25,17 +35,31 @@ async def cmd_start(message: types.Message):
 async def receive_prompt(message: Message):
     prompt = message.text
     user_id = message.from_user.id
-    jsonData={"user_id": user_id, 'message': prompt}
-    jsonResponse = requests.post(
-        url+'/send_message',
-        json=jsonData,
-    )
+    try:
+        jsonData={"user_id": user_id, 'message': prompt}
 
-    response = jsonResponse.json()
-    await message.answer(response['message'])
+        jsonResponse = requests.post(
+            url+'/send_message',
+            json=jsonData,
+        )
 
+        response = jsonResponse.json()
+        if 'message' in response:
+            answer = response['message']
+        else:
+            answer = "Получен некорректный ответ от сервера. Попробуйте позже."
+        await message.answer(answer)
+    except requests.exceptions.JSONDecodeError:
+        logger.error("Ответ от сервера не является валидным JSON")
+        answer = "Произошла ошибка, попробуйте позже..."
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP ошибка от Flask-сервера: {e} (статус: {jsonResponse.status_code})")
+        answer = "Произошла ошибка, попробуйте позже..."
+    except Exception as e:
+        logger.error(f"Необработанная ошибка в функции receive_prompt: {e}")
+        answer = "Произошла ошибка, попробуйте позже..."
+    await message.answer(answer)
 
-# initialize polling to wait for incoming messages
 async def main():
     await dp.start_polling(bot)
 
