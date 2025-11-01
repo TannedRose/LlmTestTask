@@ -1,5 +1,6 @@
 from aiogram import F
 import asyncio
+from aiogram.enums import ChatAction
 from aiogram.types import Message
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters.command import Command
@@ -28,14 +29,14 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "Привет! Я чат-бот помощник Паритет Банка. Отправь мне свой вопрос — и я постараюсь дать тебе качественный ответ!")
+        "Добро пожаловать! Я виртуальный помощник Паритет Банка. Задайте свой вопрос — и я оперативно помогу вам разобраться в продуктах, услугах и возможностях банка.")
 
 
 @dp.message(F.text)
 async def receive_prompt(message: Message):
     prompt = message.text
     user_id = message.from_user.id
-
+    await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
     try:
         jsonData={"user_id": user_id, 'message': prompt}
 
