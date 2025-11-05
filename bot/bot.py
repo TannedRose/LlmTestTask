@@ -1,5 +1,7 @@
 from aiogram import F
 import asyncio
+
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction
 from aiogram.types import Message
 from aiogram import Bot, Dispatcher, types
@@ -23,7 +25,7 @@ if not bot_token:
 
 url = 'http://flask:5000/'
 
-bot = Bot(str(bot_token))
+bot = Bot(str(bot_token), default=DefaultBotProperties(parse_mode='HTML') )
 dp = Dispatcher()
 
 @dp.message(Command("start"))
@@ -37,6 +39,7 @@ async def receive_prompt(message: Message):
     prompt = message.text
     user_id = message.from_user.id
     await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
+
     try:
         jsonData={"user_id": user_id, 'message': prompt}
 

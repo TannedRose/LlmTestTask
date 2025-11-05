@@ -20,8 +20,8 @@ if not OPENAI_API_KEY:
 client_openai = OpenAI(api_key=OPENAI_API_KEY)
 
 try:
-    client = chromadb.PersistentClient(path="chromadb_faq_openai")
-    collection = client.get_collection(name="faq_collection_openai")
+    chroma_client = chromadb.PersistentClient(path="chromadb_faq_openai")
+    collection = chroma_client.get_collection(name="faq_collection_openai")
 except Exception as e:
     logger.error(f"Ошибка при инициализации ChromaDB: {e}")
     raise RuntimeError("Не удалось подключиться к коллекции ChromaDB") from e
@@ -32,7 +32,6 @@ app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'dev-secret-key-unsafe'
 
 
 def resolve_entity_with_context(query, context):
-    """Преобразует query в более ясный поисковый запрос, учитывая context."""
     if not isinstance(context, list):
         logger.warning(f"Context не является списком: {context}, type: {type(context)}. Используем пустой список.")
         context = []
@@ -46,39 +45,21 @@ def resolve_entity_with_context(query, context):
 
     context_str = "\n".join(context)
     resolution_prompt = (
-        f"Текущий вопрос пользователя: '{query}'.\n"
-        f"Предыдущие сообщения пользователя (контекст, порядок важен): \n{context_str}\n\n"
-        "Вопрос '{query}' содержит местоимение (например, 'он', 'она', 'это'). "
-        "Твоя задача - понять, ЧТО именно обозначает это местоимение, ССЫЛАЯСЬ НА ПОСЛЕДНИЕ СООБЩЕНИЯ в КОНТЕКСТЕ.\n\n"
-
-        "ИНСТРУКЦИЯ:\n"
-        "1. Проанализируй КОНТЕКСТ С КОНЦА (начиная с последнего сообщения) на предмет упоминаний конкретных сущностей (например, 'семинар по ...').\n"
-        "2. Найди БЛИЖАЙШУЮ к текущему вопросу '{query}' сущность, КОТОРАЯ может быть объектом местоимения 'он/она/это'.\n"
-        "3. Замени местоимение в вопросе '{query}' на НАЗВАНИЕ найденной сущности.\n"
-        "4. Если подходящей сущности нет, верни оригинальный вопрос {query}.\n\n"
-
-        "ПРИМЕР:\n"
-        "Контекст: ['Когда будет семинар по налогам?', 'а будет семинар по wildberries?']\n"
-        "Текущий вопрос: 'Где он будет проходить?'\n"
-        "Анализ: Последнее упоминание сущности - 'семинар по wildberries?'. 'он' скорее всего про него.\n"
-        "Результат: Где будет проходить семинар по wildberries?\n\n"
-
-        "Финальный уточнённый поисковый запрос для вопроса '{query}':"
+        f"Вопрос: {query}\n"
+        f"Контекст (последние сообщения):\n{context_str}\n\n"
+        "Если в вопросе есть местоимение (он/она/оно/это/тот/та и т.п.), "
+        "замени его на конкретную сущность из контекста. "
+        "Анализируй контекст снизу вверх и выбирай ближайшее подходящее упоминание.\n"
+        "Если подходящей сущности нет — оставь вопрос без изменений.\n"
+        "Ответ должен содержать ТОЛЬКО итоговый вопрос. Ничего больше не пиши."
     )
     try:
         response = client_openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": resolution_prompt}],
-            max_tokens=100,
-            temperature=0.0
+            max_tokens=100
         )
         refined_query_for_search = response.choices[0].message.content.strip()
-        if refined_query_for_search.startswith("Финальный уточнённый поисковый запрос для вопроса"):
-             colon_index = refined_query_for_search.find(':')
-             if colon_index != -1:
-                 refined_query_for_search = refined_query_for_search[colon_index+1:].strip()
-             else:
-                 logger.warning(f"Модель вернула неожиданный формат: {refined_query_for_search}. Используем как есть.")
         logger.info(f"Уточнённый запрос для поиска: {refined_query_for_search}")
         return refined_query_for_search
     except OpenAIError as e:
@@ -125,7 +106,7 @@ def send_message():
         try:
             results = collection.query(
                 query_embeddings=query_embedding,
-                n_results=10
+                n_results=7
             )
         except Exception as e:
             logger.error(f"Ошибка при запросе к ChromaDB: {e}")
@@ -142,13 +123,24 @@ def send_message():
         else:
             raw_info = "\n\n".join(filtered_docs)
             prompt = (
-                "Ты — профессиональный консультант Белагропромбанка. "
-                "Ответь на вопрос пользователя, используя только предоставленную информацию о семинарах.\n\n"
-                f"- Вопрос пользователя: «{query}»\n"
-                f"- Предоставленная информация (результаты поиска по уточнённому запросу '{resolved_query_for_search}'):\n{raw_info}\n\n"
-                f"- Контекст (предыдущие сообщения пользователя, для понимания стиля или уточнений, если необходимо): {list(reversed(context))}\n"
-                "Сформулируй структурированный, дружелюбный и точный ответ на вопрос «{query}». "
-                "Не добавляй ничего от себя (без приветствия)."
+                "Ты — профессиональный консультант ОАО «Белагропромбанк». "
+                "Твоя задача — ответить на вопрос пользователя, используя ТОЛЬКО предоставленную информацию о семинарах.\n\n"
+
+                "СТРОГИЕ ПРАВИЛА:\n"
+                "- Отвечай ЧИСТЫМ ТЕКСТОМ. НИКАКИХ символов форматирования!\n"
+                "- ЗАПРЕЩЕНО использовать: *, **, __, ##, ``` , <b>, <i>, [текст](ссылка), **любые звёздочки и угловые скобки**.\n"
+                "- Ссылки пиши как обычный URL (например: https://example.com).\n"
+                "- Не выделяй заголовки жирным. Вместо '**Дата:**' пиши просто 'Дата:'.\n"
+                "- Используй только буквы, цифры, пробелы, дефисы, точки, двоеточия, переносы строк.\n\n"
+
+                f"Вопрос пользователя: «{query}»\n"
+                f"Уточнённый поисковый запрос: «{resolved_query_for_search}»\n"
+                f"Релевантная информация из базы знаний:\n{raw_info}\n"
+                f"Контекст диалога (предыдущие сообщения): {list(reversed(context))}\n\n"
+
+                "Сформулируй краткий, дружелюбный и точный ответ. "
+                "Не добавляй приветствий, прощаний или фраз вроде 'Вот информация'. "
+                "Начни сразу с сути. Ответ должен быть готов к отправке в Telegram без ошибок."
             )
 
             try:
@@ -165,8 +157,7 @@ def send_message():
                 logger.error(f"Неожиданная ошибка при вызове OpenAI: {e}")
                 return jsonify({"message": "Произошла ошибка, попробуйте позже..."})
 
-        response = {'message': answer}
-        return jsonify(response)
+        return jsonify({"message": answer})
     except Exception as e:
         logger.error(f"Необработанная ошибка в функции /send_message: {e}")
         return jsonify({"message": "Произошла ошибка, попробуйте позже..."})
