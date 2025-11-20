@@ -1,84 +1,103 @@
+import json
+import logging
 from collections import defaultdict
 
 from flask import Flask, jsonify, render_template, request
-from openai import OpenAI, OpenAIError
+from langchain.chat_models import ChatOpenAI
+from vector_db import VectorDB
+from langchain_chroma import Chroma
+import config
+import dateparser
+from datetime import datetime, timedelta
+import re
 
-import chromadb
-import os
-import logging
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s'
-)
+# --- Настройка логирования ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY не задан в переменных окружения")
-
-client_openai = OpenAI(api_key=OPENAI_API_KEY)
-
-try:
-    chroma_client = chromadb.PersistentClient(path="chromadb_faq_openai")
-    collection = chroma_client.get_collection(name="faq_collection_openai")
-except Exception as e:
-    logger.error(f"Ошибка при инициализации ChromaDB: {e}")
-    raise RuntimeError("Не удалось подключиться к коллекции ChromaDB") from e
-
+# --- Flask ---
 app = Flask(__name__)
 user_context = defaultdict(list)
-app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'dev-secret-key-unsafe')
+app.config['SECRET_KEY'] = 'dev-secret-key-unsafe'
 
+vector_db = VectorDB()
+vector_db.vector_store = Chroma(
+    persist_directory=vector_db.persist_directory,
+    embedding_function=vector_db.embedding_model,
+    collection_name="events_collection",
+)
+collection = vector_db.vector_store
 
-def resolve_entity_with_context(query, context):
-    if not isinstance(context, list):
-        logger.warning(f"Context не является списком: {context}, type: {type(context)}. Используем пустой список.")
-        context = []
-    if not all(isinstance(item, str) for item in context):
-         logger.warning(f"Context содержит не строковые элементы: {context}. Оставляем только строковые.")
-         context = [item for item in context if isinstance(item, str)]
+chat_client = ChatOpenAI(model_name="gpt-4o-mini", openai_api_key=config.OPENAI_API_KEY)
 
-    if not isinstance(query, str):
-        logger.warning(f"Query не является строкой: {query}, type: {type(query)}. Используем пустую строку.")
-        query = ""
+def parse_date_range(text):
+    now = datetime.now().date()
 
-    context_str = "\n".join(context)
-    resolution_prompt = (
-        f"Вопрос: {query}\n"
-        f"Контекст (последние сообщения):\n{context_str}\n\n"
-        "Если в вопросе есть местоимение (он/она/оно/это/тот/та и т.п.), "
-        "замени его на конкретную сущность из контекста. "
-        "Анализируй контекст снизу вверх и выбирай ближайшее подходящее упоминание.\n"
-        "Если подходящей сущности нет — оставь вопрос без изменений.\n"
-        "Ответ должен содержать ТОЛЬКО итоговый вопрос. Ничего больше не пиши."
+    match = re.search(r'(\d+)-е числа', text)
+    if match:
+        day = int(match.group(1))
+        start = now.replace(day=day)
+        end = now.replace(day=min(day+9,28))
+        return start, end
+
+    match = re.search(r'после\s+(\d{1,2}\s[а-я]+)', text.lower())
+    if match:
+        start = dateparser.parse(match.group(1), languages=["ru"])
+        if start:
+            return start.date(), None
+
+    parsed = dateparser.parse(text, languages=["ru"])
+    if parsed:
+        return parsed.date(), parsed.date()
+
+    return None, None
+
+def resolve_entity_with_context(query, context, max_context=5):
+
+    context_slice = context[-max_context:]
+    context_str = "\n".join(str(c) for c in context_slice)
+    prompt = (
+        f"Вопрос: {query}\nКонтекст (последние сообщения):\n{context_str}\n"
+        "Если есть местоимения, замени их на конкретные сущности. "
+        "Ответ только итоговым вопросом."
     )
     try:
-        response = client_openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": resolution_prompt}],
-            max_tokens=100
-        )
-        refined_query_for_search = response.choices[0].message.content.strip()
-        logger.info(f"Уточнённый запрос для поиска: {refined_query_for_search}")
-        return refined_query_for_search
-    except OpenAIError as e:
-        logger.error(f"Ошибка OpenAI при разрешении сущности/уточнении запроса: {e}")
-        return query
+        response = chat_client.invoke([{"role": "user", "content": prompt}])
+        return response.content.strip() or query
     except Exception as e:
-        logger.error(f"Неожиданная ошибка при разрешении сущности/уточнении запроса: {e}")
+        logger.error(f"Ошибка при уточнении запроса: {e}")
         return query
 
-def get_embedding(text):
-    try:
-        response = client_openai.embeddings.create(
-            input=text,
-            model="text-embedding-3-small"
-        )
-        return response.data[0].embedding
-    except OpenAIError as e:
-        logger.error(f"Ошибка OpenAI при создании эмбеддинга: {e}")
-        raise
+def filter_events_by_date_and_speaker(events, start_date=None, end_date=None, speaker=None):
+    filtered = []
+
+    for event_text in events:
+        if isinstance(event_text, dict):
+            # Если вдруг пришёл dict — берём текст из ключа
+            event_text = event_text.get("text", str(event_text))
+
+        date_match = re.search(r'\d{1,2}\s[а-яё]+ \d{4}', event_text, re.IGNORECASE)
+        event_date = None
+        if date_match:
+            try:
+                event_date = dateparser.parse(date_match.group(0), languages=["ru"]).date()
+            except Exception:
+                pass
+
+        # Проверка по дате
+        if start_date and event_date and event_date < start_date:
+            continue
+        if end_date and event_date and event_date > end_date:
+            continue
+
+        if speaker and speaker.lower() not in event_text.lower():
+            continue
+
+        filtered.append(event_text)
+
+    return filtered
+
+
 
 @app.route('/')
 def index():
@@ -88,78 +107,66 @@ def index():
 def send_message():
     try:
         data = request.get_json()
-        query = data['message']
-        user_id = str(data['user_id'])
+        query = data.get('message', '')
+        user_id = str(data.get('user_id', 'anon'))
 
         context = user_context[user_id][-3:]
         user_context[user_id].append(query)
 
-        resolved_query_for_search = resolve_entity_with_context(query, context)
-
-        try:
-            embedding = get_embedding(resolved_query_for_search)
-            query_embedding = [embedding]
-        except Exception as e:
-            logger.error(f"Ошибка при создании эмбеддинга: {e}")
-            return jsonify({"message": "Произошла ошибка, попробуйте позже..."})
-
-        try:
-            results = collection.query(
-                query_embeddings=query_embedding,
-                n_results=7
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при запросе к ChromaDB: {e}")
-            return jsonify({"message": "Произошла ошибка, попробуйте позже..."})
-
+        resolved_query = resolve_entity_with_context(query, context)
+        logger.info(f"уточненный вопрос {resolved_query}")
+        results = collection.similarity_search_with_score(query, k=10)
         threshold = 1.4
-        filtered_docs = []
-        for doc, dist in zip(results['documents'][0], results['distances'][0]):
-            if dist < threshold:
-                filtered_docs.append(doc)
+        events = []
+        logger.info(f"EVENTS: {events}")
+        for doc, score in results:
+            if score < threshold:
+                content = doc.page_content.strip()
+                if not content:
+                    logger.warning("Пустое событие пропущено")
+                    continue
+                try:
+                    event = json.loads(content)
+                except json.JSONDecodeError:
+                    event = {"Описание": content}
+                events.append(event)
 
-        if not filtered_docs:
-            answer = "Не могу найти информацию по вашему вопросу о семинарах."
+        start_date, end_date = parse_date_range(query)
+        speaker_match = re.search(r'с\s+([А-ЯЁа-яё\s-]+)', query)
+        speaker = speaker_match.group(1).strip() if speaker_match else None
+
+        filtered_events = filter_events_by_date_and_speaker(events, start_date, end_date, speaker)
+
+        if not filtered_events:
+            answer = "Информация по вашему запросу не найдена."
         else:
-            raw_info = "\n\n".join(filtered_docs)
-            prompt = (
-                "Ты — профессиональный консультант ОАО «Белагропромбанк». "
-                "Твоя задача — ответить на вопрос пользователя, используя ТОЛЬКО предоставленную информацию о семинарах.\n\n"
+            raw_info = "\n\n".join(filtered_events)
+            prompt = f"""
+Ты — ассистент по мероприятиям. Используй только данные из базы.
+Информация из базы:
+{raw_info}
 
-                "СТРОГИЕ ПРАВИЛА:\n"
-                "- Отвечай ЧИСТЫМ ТЕКСТОМ. НИКАКИХ символов форматирования!\n"
-                "- ЗАПРЕЩЕНО использовать: *, **, __, ##, ``` , <b>, <i>, [текст](ссылка), **любые звёздочки и угловые скобки**.\n"
-                "- Ссылки пиши как обычный URL (например: https://example.com).\n"
-                "- Не выделяй заголовки жирным. Вместо '**Дата:**' пиши просто 'Дата:'.\n"
-                "- Используй только буквы, цифры, пробелы, дефисы, точки, двоеточия, переносы строк.\n\n"
+Вопрос пользователя: {query}
 
-                f"Вопрос пользователя: «{query}»\n"
-                f"Уточнённый поисковый запрос: «{resolved_query_for_search}»\n"
-                f"Релевантная информация из базы знаний:\n{raw_info}\n"
-                f"Контекст диалога (предыдущие сообщения): {list(reversed(context))}\n\n"
-
-                "Сформулируй краткий, дружелюбный и точный ответ. "
-                "Не добавляй приветствий, прощаний или фраз вроде 'Вот информация'. "
-                "Начни сразу с сути. Ответ должен быть готов к отправке в Telegram без ошибок."
-            )
-
+Инструкции:
+1. Используй только данные из базы, не придумывай.
+2. Выделяй ключевые сущности: Дата и время, Адрес/место проведения, Спикер/докладчик, Название мероприятия.
+3. Если вопрос про конкретное имя (спикера), ищи только совпадения по полному имени.
+4. Если ничего не найдено — честно скажи, что информации нет.
+5. Формат ответа: кратко, дружелюбно, точные факты. Каждое мероприятие отдельным пунктом.
+Ответь только итоговой информацией.
+"""
             try:
-                response = client_openai.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=700
-                )
-                answer = response.choices[0].message.content
-            except OpenAIError as e:
-                logger.error(f"Ошибка OpenAI при генерации ответа: {e}")
-                return jsonify({"message": "Произошла ошибка, попробуйте позже..."})
+                response = chat_client.invoke([{"role": "user", "content": prompt}])
+                answer = response.content.strip()
             except Exception as e:
-                logger.error(f"Неожиданная ошибка при вызове OpenAI: {e}")
-                return jsonify({"message": "Произошла ошибка, попробуйте позже..."})
+                logger.error(f"Ошибка при генерации ответа: {e}")
+                answer = "Произошла ошибка при генерации ответа."
 
         return jsonify({"message": answer})
+
     except Exception as e:
-        logger.error(f"Необработанная ошибка в функции /send_message: {e}")
+        logger.error(f"Необработанная ошибка в /send_message: {e}")
         return jsonify({"message": "Произошла ошибка, попробуйте позже..."})
 
 if __name__ == "__main__":

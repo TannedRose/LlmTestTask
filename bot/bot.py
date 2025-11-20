@@ -62,7 +62,7 @@ async def receive_prompt(message: Message):
     except Exception as e:
         logger.error(f"Необработанная ошибка в функции receive_prompt: {e}")
         answer = "Произошла ошибка, попробуйте позже..."
-    await message.answer(answer)
+    await message.answer(answer, disable_web_page_preview=True, parse_mode="Markdown")
 
 
 async def main():
